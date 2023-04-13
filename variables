@@ -1,0 +1,47 @@
+variable "aws_profile" {
+  type = string
+  //default = "sites1"
+  description = "please give the profile name here"
+}
+
+variable "aws_region" {
+  type = string
+  default = "us-east-1"
+}
+
+
+variable "web_instance_id" {
+  type = string
+  description = "Please provide the web instace id to attach for target group"
+ // default = "i-02fd627b901304dac"
+}
+
+variable "existing_sg" {
+  type = string
+  description = "Please provide existing sg to attach to loadbalancer"
+ // default = "sg-05ca7dfb316178412"
+}
+
+
+variable "domain_name" {
+  type = string
+ // default = "hireforbetter.com"
+  description = "Please provide full domain name here.Eg alljobs.ai"
+}
+
+variable "ins_type" {
+  type = string
+  default = "c5.large"
+  description = "Instance type to add it in the launch template configuration"
+}
+
+variable "keyfile" {
+  type = string
+  //default = "web-landing-hcnew-nv"
+  description = "Please provide the name  key file to attach it to launch template.Eg: web-landing-hcnew-nv"
+}
+
+locals {
+  my_domain = "${var.domain_name}"
+  domainindexzero =element(split(".", local.my_domain), 0)
+}
