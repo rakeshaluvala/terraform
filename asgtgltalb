@@ -1,0 +1,252 @@
+terraform {
+  required_providers {
+    aws = {
+      source = "hashicorp/aws"
+      version = "~>4.0"
+    }
+  }
+}
+provider "aws" {
+  profile = var.aws_profile
+  region  = var.aws_region
+}
+
+data "aws_vpc" "default" {
+  default = true
+}
+
+
+data "aws_subnets" "subnets" {
+  filter {
+   name   = "vpc-id"
+   values = [data.aws_vpc.default.id]
+  }
+}
+
+output "awsvpc" {
+  value = data.aws_vpc.default.id
+}
+output "subnet_ids" {
+  value = data.aws_subnets.subnets.ids
+}
+output "my_domain" {
+  value = local.domainindexzero
+}
+
+//Target group creation for web
+resource "aws_lb_target_group" "my_target_group" {
+  name        = "${local.domainindexzero}-web-tg"
+  port        = 80
+  protocol    = "HTTP"
+  target_type = "instance"
+  vpc_id      =  data.aws_vpc.default.id
+  health_check {
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+  }
+}
+
+//Target group creation for landing
+resource "aws_lb_target_group" "my_target_group_landing" {
+  name        = "${local.domainindexzero}-landing-tg"
+  port        = 80
+  protocol    = "HTTP"
+  target_type = "instance"
+  vpc_id      =  data.aws_vpc.default.id
+  health_check {
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    interval            = 30
+    matcher             = "200"
+    path                = "/"
+    port                = "traffic-port"
+    protocol            = "HTTP"
+    timeout             = 5
+  }
+}
+
+
+
+//adding instance to tg
+resource "aws_lb_target_group_attachment" "my_target_group_attachment" {
+  target_group_arn = "${aws_lb_target_group.my_target_group.arn}"
+  target_id        = var.web_instance_id
+  port             = 80
+}
+
+//Getting acm cert details from the domain name
+data "aws_acm_certificate" "cert" {
+  domain   = var.domain_name
+  //statuses = ["ISSUED"]
+}
+
+output "domain_cert" {
+  value = data.aws_acm_certificate.cert.arn
+}
+
+//alb creation
+resource "aws_lb" "my_lb" {
+  name               = "${local.domainindexzero}-web-alb"
+  load_balancer_type = "application"
+  subnets            = data.aws_subnets.subnets.ids
+  security_groups    = [var.existing_sg]
+  tags = {
+    Name = "${local.domainindexzero}-web-alb"
+  }
+}
+
+output "alb_dns_name" {
+  value = aws_lb.my_lb.dns_name
+}
+
+//alb rules redirection
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.my_lb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type = "redirect"
+
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.my_lb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+
+  certificate_arn = data.aws_acm_certificate.cert.arn
+  default_action {
+  type             = "fixed-response"
+  fixed_response  {
+    content_type = "text/html"
+    message_body = "Page Not Found"
+    status_code  = "404"
+  }
+ }
+}
+output "http" {
+  value = aws_lb_listener.http
+}
+output "https" {
+  value = aws_lb_listener.https
+}
+
+
+//Adding a listener rule to add www and  domain as well
+resource "aws_lb_listener_rule" "redirect_www" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 100
+
+  action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+      host        = "${var.domain_name}"
+    }
+  }
+  condition {
+    host_header {
+      values = ["www.${var.domain_name}"]
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "redirect_main" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 101
+
+  action {
+    type = "forward"
+    target_group_arn = "${aws_lb_target_group.my_target_group.arn}"
+}
+  condition {
+    host_header {
+      values = ["${var.domain_name}"]
+    }
+  }
+}
+
+//to get the most recent ami for the launch template
+data "aws_ami" "ubuntu" {
+  most_recent = true
+
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm*"]
+  }
+}
+
+
+//launch template creation
+resource "aws_launch_template" "lt" {
+  name = "${local.domainindexzero}-landing-lt"
+  instance_type = "${var.ins_type}"
+  key_name = "${var.keyfile}"
+  image_id  = "${data.aws_ami.ubuntu.id}"
+  vpc_security_group_ids = [
+    "${var.existing_sg}"
+  ]
+  tag_specifications {
+    resource_type = "instance"
+
+    tags = {
+      Name = "${local.domainindexzero}-landing-lt"
+    }
+  }
+  tag_specifications {
+    resource_type = "volume"
+
+    tags = {
+      Name = "${local.domainindexzero}-landing-lt"
+    }
+  }
+}
+output lt {
+  value = aws_launch_template.lt.name
+}
+
+
+// Autoscalar creation and attaching it to the launch template
+resource "aws_autoscaling_group" "my-asg" {
+  name                 = "${local.domainindexzero}-landing-asg"
+  launch_template {
+    id      = "${aws_launch_template.lt.id}"
+    version = "$Latest"
+  }
+  vpc_zone_identifier  = tolist(data.aws_subnets.subnets.ids)
+  desired_capacity     = 0
+  max_size             = 0
+  min_size             = 0
+  health_check_type = "ELB"
+  health_check_grace_period = 300
+  lifecycle {
+    ignore_changes = [load_balancers, target_group_arns]
+  }
+  tag  {
+    key = "Name"
+    value = "${local.domainindexzero}-landing-spot"
+    propagate_at_launch = true
+  }
+}
+
+resource "aws_autoscaling_attachment" "tg_attachment" {
+  autoscaling_group_name = "${aws_autoscaling_group.my-asg.name}"
+  lb_target_group_arn      = "${ aws_lb_target_group.my_target_group_landing.arn}"
+}
+
